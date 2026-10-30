@@ -1,0 +1,385 @@
+<!doctype html>
+<!--
+  pipdrop hook title: serif words + ONE handwritten word that writes itself on, circled by a marker loop,
+  with a hand-drawn "line boil" (the drawing re-poses every 3 frames).
+
+  Setup (once per project):
+    npx hyperframes add hw-write-title          # brings assets/baked/caveat-pen.js + assets/fonts/Caveat-700-latin.woff2
+    rm compositions/hw-write-title.html         # only its baked glyphs and font are used
+    cp <skill>/template/hook-title.html compositions/hook-title.html
+  Mount it from tools/build_edit.py: CONFIG["extra_hosts"] = [("hook-title", 0, <D>, 20)]
+
+  Edit only the CONFIG block below. The pen-velocity ease, glyph masks and boil helpers are adapted from
+  HyperFrames' hw-write-title / hw-boil registry items (Apache-2.0, heygen-com/hyperframes).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="assets/baked/caveat-pen.js"></script>
+    <style>
+      @font-face {
+        font-family: "Caveat";
+        src: url("assets/fonts/Caveat-700-latin.woff2") format("woff2");
+        font-weight: 700;
+        font-display: block;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: transparent;
+        overflow: hidden;
+      }
+      #ht-root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: transparent;
+      }
+      #ht-scrim {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1080px;
+        height: 700px;
+        background: linear-gradient(180deg, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0.25) 55%, rgba(0, 0, 0, 0) 100%);
+        opacity: 0;
+      }
+      #ht-move {
+        position: absolute;
+        left: 0;
+        top: 178px;
+        width: 1080px;
+      }
+      .ht-line {
+        display: flex;
+        justify-content: center;
+        align-items: flex-end;
+        gap: 88px;
+      }
+      .ht-line + .ht-line {
+        margin-top: -32px;
+      }
+      .ht-line.hw-last {
+        padding-right: 70px; /* balances the loop that overhangs the handwritten word */
+      }
+      .ht-line.hw-first {
+        padding-left: 40px;
+      }
+      .ht-serif {
+        font-family: "EB Garamond", serif;
+        font-style: italic;
+        font-weight: 500;
+        font-size: 88px;
+        line-height: 1;
+        color: #fff6e3;
+        white-space: nowrap;
+        text-shadow: 0 3px 18px rgba(0, 0, 0, 0.6), 0 1px 3px rgba(0, 0, 0, 0.5);
+      }
+      .ht-serif .w {
+        display: inline-block;
+      }
+      .ht-hw {
+        position: relative;
+        filter: drop-shadow(0 3px 10px rgba(0, 0, 0, 0.5));
+      }
+      .ht-hw svg {
+        display: block;
+        overflow: visible;
+      }
+      #ht-circ {
+        position: absolute;
+        overflow: visible;
+        pointer-events: none;
+      }
+      #ht-circ path {
+        fill: none;
+        stroke-width: 6.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ht-root" data-composition-id="hook-title" data-start="0" data-duration="6" data-width="1080" data-height="1920">
+      <div id="ht-scrim"></div>
+      <div id="ht-move"></div>
+      <div
+        id="ht-drv"
+        class="clip"
+        data-start="0"
+        data-duration="6"
+        data-track-index="0"
+        style="position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none"
+      ></div>
+    </div>
+    <script>
+      (function () {
+        window.__timelines = window.__timelines || {};
+
+        var CONFIG = {
+          // Lines of the title. Exactly one {hw: "..."} item: the handwritten, circled word.
+          //   "What is your why?"                 -> [[{ serif: "What is your" }, { hw: "why?" }]]
+          //   "Why you need to / trust in yourself" -> [[{ hw: "Why" }, { serif: "you need to" }], [{ serif: "trust in yourself" }]]
+          lines: [[{ serif: "What is your" }, { hw: "why?" }]],
+          D: 6, // slot length in seconds: keep data-duration (twice above) and the host's duration equal to this
+          exitAt: 5.72, // the title blurs out here
+          hwSize: 200, // px of the handwriting (Caveat em)
+          serifSize: 88, // px, keep equal to .ht-serif font-size
+          serifAt: 0.12, // serif words BEFORE the handwritten word start here
+          serifStep: 0.08,
+          serifLead: 0.15, // serif words AFTER it start this long before the pen lifts
+          hwAt: 0.5, // when the pen starts (pushed later automatically if serif words come first)
+          writeMax: 1.25, // the pen's total time for the word
+          circleDur: 0.5,
+          circlePad: [0.2, 0.12], // the loop's reach past the word (x, y), as a fraction of it
+          ink: "#F4C66B", // the film's accent: the same gold as its answer
+          top: 178, // px from the top of the frame (platform status bar ends at 168)
+        };
+        var FPS = 30,
+          DROP = 3; // the boil re-poses every 3 frames: 10 drawings a second
+
+        function hash(n, seed) {
+          var x = Math.sin(n * 127.1 + (seed || 1) * 311.7) * 43758.5453;
+          return (x - Math.floor(x)) * 2 - 1;
+        }
+        function onUpdate(tl, fn) {
+          if (!tl.__htRenders) {
+            tl.__htRenders = [];
+            tl.eventCallback("onUpdate", function () {
+              for (var i = 0; i < tl.__htRenders.length; i++) tl.__htRenders[i]();
+            });
+          }
+          tl.__htRenders.push(fn);
+          fn();
+        }
+        // pen-velocity ease: fast on straights, slow into curves (from hw-write-title)
+        function penEase(pathEl) {
+          var L = pathEl.getTotalLength();
+          if (L <= 0) return { ease: function (t) { return t; }, inkTime: 1 };
+          var PRE = 48, pts = [], i;
+          for (i = 0; i <= PRE; i++) pts.push(pathEl.getPointAtLength((L * i) / PRE));
+          var curv = [0];
+          for (i = 1; i < PRE; i++) {
+            var ax = pts[i].x - pts[i - 1].x, ay = pts[i].y - pts[i - 1].y;
+            var bx = pts[i + 1].x - pts[i].x, by = pts[i + 1].y - pts[i].y;
+            var la = Math.hypot(ax, ay) || 1e-6, lb = Math.hypot(bx, by) || 1e-6;
+            var dot = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (la * lb)));
+            curv.push(Math.acos(dot) / ((la + lb) / 2));
+          }
+          curv.push(0);
+          var mass = 0;
+          for (i = 0; i < curv.length; i++) mass += curv[i];
+          var N = Math.max(25, Math.min(75, Math.round(25 + mass * 18)));
+          var seg = L / N, times = [0], t = 0;
+          for (i = 1; i <= N; i++) {
+            var u = ((i - 0.5) / N) * PRE, i0 = Math.floor(u), f = u - i0;
+            var c = curv[Math.min(i0, PRE)] * (1 - f) + curv[Math.min(i0 + 1, PRE)] * f;
+            t += seg / Math.max(1 / (1 + 10 * c * 14), 0.22);
+            times.push(t);
+          }
+          for (i = 0; i <= N; i++) times[i] /= t;
+          return {
+            inkTime: t,
+            ease: function (p) {
+              if (p <= 0) return 0;
+              if (p >= 1) return 1;
+              var lo = 0, hi = N;
+              while (hi - lo > 1) {
+                var mid = (lo + hi) >> 1;
+                if (times[mid] <= p) lo = mid;
+                else hi = mid;
+              }
+              return (lo + (p - times[lo]) / (times[hi] - times[lo] || 1e-9)) / N;
+            },
+          };
+        }
+        // filled Caveat outlines revealed through masks of baked centerline strokes
+        function buildWord(g, text) {
+          var table = window.__hwPenCaveat, ns = "http://www.w3.org/2000/svg";
+          var x = 0, strokes = [], gi = 0;
+          for (var ci = 0; ci < text.length; ci++) {
+            var ch = text[ci], gl = table.glyphs[ch];
+            if (ch === " ") { x += 340; continue; }
+            if (!gl) { console.warn("hook-title: no baked glyph for " + ch); continue; }
+            var gg = document.createElementNS(ns, "g");
+            gg.setAttribute("transform", "translate(" + x + ",0)");
+            var mask = document.createElementNS(ns, "mask");
+            mask.setAttribute("id", "ht-m" + gi);
+            mask.setAttribute("maskUnits", "userSpaceOnUse");
+            mask.setAttribute("x", "-200");
+            mask.setAttribute("y", "-900");
+            mask.setAttribute("width", gl.adv + 400);
+            mask.setAttribute("height", "1400");
+            for (var si = 0; si < gl.strokes.length; si++) {
+              var mp = document.createElementNS(ns, "path");
+              mp.setAttribute("d", gl.strokes[si]);
+              mp.setAttribute("fill", "none");
+              mp.setAttribute("stroke", "#fff");
+              mp.setAttribute("stroke-width", Math.max(30, Math.round(gl.stem * 1.35)));
+              mp.setAttribute("stroke-linecap", "round");
+              mp.setAttribute("stroke-linejoin", "round");
+              mask.appendChild(mp);
+              strokes.push(mp);
+            }
+            gg.appendChild(mask);
+            var op = document.createElementNS(ns, "path");
+            op.setAttribute("d", gl.outline);
+            op.setAttribute("fill", CONFIG.ink);
+            op.setAttribute("mask", "url(#ht-m" + gi + ")");
+            gg.appendChild(op);
+            g.appendChild(gg);
+            x += gl.adv;
+            gi++;
+          }
+          return { widthUnits: x, strokes: strokes };
+        }
+        function writeOn(tl, strokes, at) {
+          var lift = 0.06, metas = [], inkSum = 0, i;
+          for (i = 0; i < strokes.length; i++) {
+            var pe = penEase(strokes[i]), len = strokes[i].getTotalLength();
+            metas.push({ pe: pe, len: len, st: { p: 0 } });
+            inkSum += pe.inkTime;
+            strokes[i].setAttribute("stroke-dasharray", len + " " + len);
+            strokes[i].style.opacity = "0";
+          }
+          var dur = Math.min(CONFIG.writeMax, Math.max(0.8, 0.4 + 0.12 * strokes.length));
+          var drawTotal = Math.max(0.1, dur - lift * (strokes.length - 1)), t = at;
+          for (i = 0; i < metas.length; i++) {
+            var d = (metas[i].pe.inkTime / inkSum) * drawTotal;
+            tl.to(metas[i].st, { p: 1, duration: d, ease: metas[i].pe.ease }, t);
+            t += d + lift;
+          }
+          onUpdate(tl, function () {
+            for (var i = 0; i < metas.length; i++) {
+              strokes[i].style.strokeDashoffset = metas[i].len * (1 - metas[i].st.p);
+              strokes[i].style.opacity = metas[i].st.p > 0 ? "1" : "0";
+            }
+          });
+          return t - lift;
+        }
+        // a marker loop: starts upper-left, goes round once, overshoots and drifts outward
+        function loopPath(cx, cy, rx, ry, seed) {
+          var N = 36, start = -2.5, sweep = Math.PI * 2 + 0.75, pts = [], tilt = -0.07;
+          for (var i = 0; i <= N; i++) {
+            var k = i / N, a = start + sweep * k;
+            var r = (1 + 0.07 * k) * (1 + hash(i * 7 + 3, seed) * 0.022);
+            var px = Math.cos(a) * rx * r, py = Math.sin(a) * ry * r;
+            pts.push([cx + px * Math.cos(tilt) - py * Math.sin(tilt), cy + px * Math.sin(tilt) + py * Math.cos(tilt)]);
+          }
+          var d = "M" + pts[0][0].toFixed(1) + " " + pts[0][1].toFixed(1);
+          for (var j = 1; j < pts.length - 1; j++) {
+            var mx = (pts[j][0] + pts[j + 1][0]) / 2, my = (pts[j][1] + pts[j + 1][1]) / 2;
+            d += " Q" + pts[j][0].toFixed(1) + " " + pts[j][1].toFixed(1) + " " + mx.toFixed(1) + " " + my.toFixed(1);
+          }
+          return d;
+        }
+
+        /* ---- build the lines (no timed elements here, so building them in script is fine) ---- */
+        var move = document.getElementById("ht-move");
+        move.style.top = CONFIG.top + "px";
+        var serifBefore = [], serifAfter = [], seenHw = false, wi = 0;
+        var NS = "http://www.w3.org/2000/svg";
+        CONFIG.lines.forEach(function (line) {
+          var row = document.createElement("div");
+          row.className = "ht-line";
+          line.forEach(function (item, idx) {
+            if (item.hw !== undefined) {
+              seenHw = true;
+              row.classList.add(idx === line.length - 1 ? "hw-last" : "hw-first");
+              row.insertAdjacentHTML(
+                "beforeend",
+                '<span id="ht-hw" class="ht-hw"><svg id="ht-hw-svg"><defs>' +
+                  '<filter id="ht-boilf" x="-15%" y="-15%" width="130%" height="130%">' +
+                  '<feTurbulence id="ht-turb" type="fractalNoise" baseFrequency="0.018" numOctaves="2" seed="1" result="n" />' +
+                  '<feDisplacementMap in="SourceGraphic" in2="n" scale="16" xChannelSelector="R" yChannelSelector="G" />' +
+                  '</filter></defs><g id="ht-hw-g" filter="url(#ht-boilf)"></g></svg>' +
+                  '<svg id="ht-circ"><path id="ht-circ-p"></path></svg></span>',
+              );
+            } else {
+              var span = document.createElement("span");
+              span.className = "ht-serif";
+              item.serif.split(" ").forEach(function (w, k) {
+                var ws = document.createElement("span");
+                ws.className = "w";
+                ws.id = "ht-w" + wi++;
+                ws.textContent = w;
+                if (k) span.appendChild(document.createTextNode(" "));
+                span.appendChild(ws);
+                (seenHw ? serifAfter : serifBefore).push(ws.id);
+              });
+              row.appendChild(span);
+            }
+          });
+          move.appendChild(row);
+        });
+
+        var table = window.__hwPenCaveat;
+        var scale = CONFIG.hwSize / 1000;
+        var svg = document.getElementById("ht-hw-svg");
+        var hwText = null;
+        CONFIG.lines.forEach(function (l) { l.forEach(function (it) { if (it.hw !== undefined) hwText = it.hw; }); });
+        var built = buildWord(document.getElementById("ht-hw-g"), hwText);
+        var hU = table.meta.ascent - table.meta.descent;
+        var wPx = built.widthUnits * scale, hPx = hU * scale;
+        svg.setAttribute("width", Math.ceil(wPx));
+        svg.setAttribute("height", Math.ceil(hPx));
+        svg.setAttribute("viewBox", "0 " + -table.meta.ascent + " " + built.widthUnits + " " + hU);
+
+        // serif words beside the handwriting sit on its baseline
+        var desc = -table.meta.descent * scale;
+        var hwRow = document.getElementById("ht-hw").parentNode;
+        hwRow.querySelectorAll(".ht-serif").forEach(function (s) {
+          s.style.paddingBottom = Math.round(desc - 0.24 * CONFIG.serifSize) + "px";
+        });
+
+        // the loop wraps the ink (cap height to baseline), not the descender box
+        var inkTop = (table.meta.ascent - 760) * scale, inkBot = table.meta.ascent * scale;
+        var cw = wPx * (1 + 2 * CONFIG.circlePad[0]), chh = (inkBot - inkTop) * (1 + 2 * CONFIG.circlePad[1]) + 40;
+        var circ = document.getElementById("ht-circ");
+        circ.setAttribute("width", Math.ceil(cw + 40));
+        circ.setAttribute("height", Math.ceil(chh + 40));
+        circ.style.left = Math.round(wPx / 2 - (cw + 40) / 2) + "px";
+        circ.style.top = Math.round((inkTop + inkBot) / 2 - (chh + 40) / 2) + "px";
+        var circP = document.getElementById("ht-circ-p");
+        circP.style.stroke = CONFIG.ink;
+        var ccx = (cw + 40) / 2, ccy = (chh + 40) / 2, crx = cw / 2, cry = chh / 2;
+        circP.setAttribute("d", loopPath(ccx, ccy, crx, cry, 11));
+
+        /* ---- timeline ---- */
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#ht-scrim", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 0.05);
+        function blurIn(id, at) {
+          tl.fromTo("#" + id, { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.14, ease: "power2.out" }, at);
+        }
+        serifBefore.forEach(function (id, k) { blurIn(id, CONFIG.serifAt + k * CONFIG.serifStep); });
+        var hwAt = Math.max(CONFIG.hwAt, CONFIG.serifAt + serifBefore.length * CONFIG.serifStep + 0.12);
+        var writeEnd = writeOn(tl, built.strokes, hwAt);
+        serifAfter.forEach(function (id, k) { blurIn(id, writeEnd - CONFIG.serifLead + k * CONFIG.serifStep); });
+
+        var loop = { p: 0 };
+        tl.to(loop, { p: 1, duration: CONFIG.circleDur, ease: "power2.inOut" }, writeEnd + 0.05);
+
+        var turb = document.getElementById("ht-turb");
+        var hw = document.getElementById("ht-hw");
+        onUpdate(tl, function () {
+          var step = Math.floor((tl.time() * FPS) / DROP);
+          gsap.set(hw, { x: hash(step * 3, 5) * 1.4, y: hash(step * 3 + 1, 5) * 1.4, rotation: hash(step * 3 + 2, 5) * 0.45 });
+          turb.setAttribute("seed", 1 + (step % 9));
+          circP.setAttribute("d", loopPath(ccx, ccy, crx, cry, 11 + (step % 5)));
+          var L = circP.getTotalLength();
+          circP.style.strokeDasharray = L + " " + L;
+          circP.style.strokeDashoffset = L * (1 - loop.p);
+          circP.style.opacity = loop.p > 0 ? "1" : "0";
+        });
+
+        tl.to("#ht-move, #ht-scrim", { opacity: 0, filter: "blur(6px)", duration: 0.25, ease: "power2.in" }, CONFIG.exitAt);
+        window.__timelines["hook-title"] = tl;
+      })();
+    </script>
+  </body>
+</html>

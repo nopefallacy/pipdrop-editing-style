@@ -1,0 +1,10 @@
+template/hook-title.html and examples/iceberg_scene.py are original work, except for the pen-velocity ease, the baked-glyph
+mask assembly, the stroke-by-stroke write-on and the hash/boil helpers in hook-title.html, which are adapted from the
+HyperFrames registry items `hw-write-title` and `hw-boil`:
+
+  HyperFrames — https://github.com/heygen-com/hyperframes
+  Copyright HeyGen, licensed under the Apache License, Version 2.0
+  http://www.apache.org/licenses/LICENSE-2.0
+
+The baked Caveat glyph table (assets/baked/caveat-pen.js) and the Caveat font are NOT included here; they are installed into each
+project by `npx hyperframes add hw-write-title` (Caveat is licensed under the SIL Open Font License 1.1).

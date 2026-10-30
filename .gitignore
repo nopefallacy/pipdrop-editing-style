@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__/
+*.pyc
+# media never ships with the skill
+*.mp4
+*.mov
+*.MOV
+*.webm
+*.m4a
+*.ogg
+*.wav
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.HEIC
